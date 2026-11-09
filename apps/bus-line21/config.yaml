@@ -1,5 +1,5 @@
 name: "Bus line 21 countdown"
-version: "0.1.1"
+version: "0.1.2"
 slug: bus-line21
 description: "Next GVB line 21 departures at Solebaystraat, written to /share/bus_line21.json"
 arch:
