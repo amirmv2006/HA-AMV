@@ -13,4 +13,4 @@ map:
 options:
   contact_email: ""
 schema:
-  contact_email: "email?"
+  contact_email: "str?"
