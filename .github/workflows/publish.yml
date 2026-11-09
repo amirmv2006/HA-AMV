@@ -138,3 +138,40 @@ jobs:
           image-tags: ${{ needs.bump.outputs.version }}
           skip-existing: ${{ needs.bump.outputs.version }}
           container-registry-password: ${{ secrets.GITHUB_TOKEN }}
+
+  release:
+    name: Create GitHub release
+    needs: [bump, manifest]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      VERSION: ${{ needs.bump.outputs.version }}
+      SHA: ${{ needs.bump.outputs.sha }}
+    steps:
+      - name: Check out bumped commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.bump.outputs.sha }}
+
+      - name: Create release with notes
+        run: |
+          set -euo pipefail
+          tag="v$VERSION"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists, leaving it alone."
+            exit 0
+          fi
+          # Use the matching CHANGELOG.md section as notes when there is one;
+          # otherwise let GitHub generate notes from merged PRs and commits.
+          awk -v v="$VERSION" 'index($0, "## " v) == 1 && length($0) == length("## " v) {on=1; next} /^## / {on=0} on' \
+            "$APP_DIR/CHANGELOG.md" > notes.md
+          if [ -s notes.md ]; then
+            gh release create "$tag" --target "$SHA" --title "$APP $VERSION" --notes-file notes.md
+          else
+            gh release create "$tag" --target "$SHA" --title "$APP $VERSION" --generate-notes
+          fi
+        env:
+          APP: bus-line21
+          APP_DIR: apps/bus-line21
