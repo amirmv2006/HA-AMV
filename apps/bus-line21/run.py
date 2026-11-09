@@ -1,16 +1,19 @@
-"""Fetch GVB line 21 departures at Solebaystraat from OVapi and write them to JSON.
+"""Fetch GVB line 21 departures at Solebaystraat from OVapi and serve them as JSON.
 
-Output (default /share/bus_line21.json) is rewritten after every poll so that
-Home Assistant can read it from its own /share folder.
+The latest result is served at http://<app-hostname>:8099/bus_line21.json on
+the Home Assistant internal network (no host port is published), so Home
+Assistant can read it with a REST sensor without any shared folder.
 """
 import gzip
 import json
 import os
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from zoneinfo import ZoneInfo
 
 from google.transit import gtfs_realtime_pb2
@@ -25,9 +28,12 @@ STOPS = {
 }
 PER_DIRECTION = 2
 POLL_SECONDS = int(os.environ.get("BUS_POLL_SECONDS", "60"))
+HTTP_PORT = int(os.environ.get("BUS_HTTP_PORT", "8099"))
 OPTIONS_PATH = os.environ.get("BUS_OPTIONS", "/data/options.json")
-OUTPUT_PATH = os.environ.get("BUS_OUTPUT", "/share/bus_line21.json")
 AMS = ZoneInfo("Europe/Amsterdam")
+
+_latest_lock = threading.Lock()
+_latest_body = None  # bytes of the last good JSON payload
 
 
 def load_contact():
@@ -109,39 +115,78 @@ def departures(msg, now_ts):
     return result
 
 
-def write_output(directions, now_ts, feed_ts):
-    payload = {
+def build_payload(directions, now_ts, feed_ts):
+    return {
         "stop_name": STOP_NAME,
         "route": "21",
         "updated": datetime.fromtimestamp(now_ts, AMS).isoformat(timespec="seconds"),
         "feed_timestamp": datetime.fromtimestamp(feed_ts, AMS).isoformat(timespec="seconds") if feed_ts else None,
         "directions": directions,
     }
-    tmp = OUTPUT_PATH + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(payload, f, indent=2, ensure_ascii=False)
-    os.replace(tmp, OUTPUT_PATH)
+
+
+def publish(payload):
+    global _latest_body
+    body = json.dumps(payload, indent=2, ensure_ascii=False).encode("utf-8")
+    with _latest_lock:
+        _latest_body = body
+    return body
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path.split("?")[0] not in ("/", "/bus_line21.json"):
+            self.send_error(404)
+            return
+        with _latest_lock:
+            body = _latest_body
+        if body is None:
+            self.send_response(503)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"error": "no data yet"}')
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *args):  # keep the add-on log quiet
+        pass
+
+
+def start_server():
+    server = ThreadingHTTPServer(("0.0.0.0", HTTP_PORT), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    print(f"serving /bus_line21.json on port {HTTP_PORT}", flush=True)
 
 
 def poll_once(feed):
     msg = feed.fetch()
     now_ts = time.time()
-    write_output(departures(msg, now_ts), now_ts, msg.header.timestamp)
+    payload = build_payload(departures(msg, now_ts), now_ts, msg.header.timestamp)
+    return publish(payload)
 
 
 def main():
     feed = Feed(user_agent(load_contact()))
     once = "--once" in sys.argv
+    if once:
+        try:
+            print(poll_once(feed).decode("utf-8"))
+        except Exception as err:
+            print(f"poll failed: {err}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    start_server()
     while True:
         try:
             poll_once(feed)
-            print("wrote", OUTPUT_PATH, flush=True)
-        except Exception as err:  # keep the last good file; log and retry
+            print("updated", datetime.now(AMS).isoformat(timespec="seconds"), flush=True)
+        except Exception as err:  # keep serving the last good payload; retry next round
             print(f"poll failed: {err}", file=sys.stderr, flush=True)
-            if once:
-                sys.exit(1)
-        if once:
-            return
         time.sleep(POLL_SECONDS)
 
 

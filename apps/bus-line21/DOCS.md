@@ -2,8 +2,24 @@
 
 Polls the public GTFS-Realtime trip-updates feed from OVapi once a minute and
 keeps the next two departures for GVB line 21 at Solebaystraat in both
-directions. The result is written to `/share/bus_line21.json`, the folder Home
-Assistant shares with apps.
+directions. The result is served as JSON on the Home Assistant internal network
+at `http://<app-hostname>:8099/bus_line21.json`. No host port is published, so
+it is not reachable from outside Home Assistant.
+
+The app hostname is shown on the app's Info tab (for example `9e519bb6-bus-line21`).
+
+Example REST sensor:
+
+```yaml
+sensor:
+  - platform: rest
+    name: Bus line 21 next to Centraal
+    resource: http://9e519bb6-bus-line21:8099/bus_line21.json
+    scan_interval: 60
+    value_template: >-
+      {% set d = value_json.directions['Centraal Station'] %}
+      {{ d[0].minutes if d else 'none' }}
+```
 
 ## Options
 
