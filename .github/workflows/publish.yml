@@ -1,0 +1,91 @@
+name: Publish apps
+
+# Builds and publishes each changed app to GHCR. Image tags come from the
+# app's config.yaml `version`; an existing tag is never overwritten.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "apps/**"
+      - ".github/workflows/publish.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  APP: bus-line21
+  APP_DIR: apps/bus-line21
+  ARCHITECTURES: '["amd64", "aarch64"]'
+  BUILDER_VERSION: "2026.09.0"
+
+jobs:
+  init:
+    name: Prepare build matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Read app version
+        id: version
+        run: |
+          version=$(sed -n 's/^version: *"\(.*\)"/\1/p' "$APP_DIR/config.yaml")
+          test -n "$version" || { echo "no version in config.yaml"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build matrix
+        id: matrix
+        uses: home-assistant/builder/actions/prepare-multi-arch-matrix@2026.09.0
+        with:
+          architectures: ${{ env.ARCHITECTURES }}
+          image-name: ${{ env.APP }}
+
+  build:
+    name: Build ${{ matrix.arch }}
+    needs: init
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.init.outputs.matrix) }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build and push image
+        uses: home-assistant/builder/actions/build-image@2026.09.0
+        with:
+          arch: ${{ matrix.arch }}
+          context: ${{ env.APP_DIR }}
+          image: ${{ matrix.image }}
+          image-tags: ${{ needs.init.outputs.version }}
+          version: ${{ needs.init.outputs.version }}
+          skip-existing: ${{ needs.init.outputs.version }}
+          container-registry-password: ${{ secrets.GITHUB_TOKEN }}
+          push: "true"
+
+  manifest:
+    name: Publish multi-arch manifest
+    needs: [init, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # Cosign signing
+      packages: write
+    steps:
+      - name: Publish manifest
+        uses: home-assistant/builder/actions/publish-multi-arch-manifest@2026.09.0
+        with:
+          architectures: ${{ env.ARCHITECTURES }}
+          image-name: ${{ env.APP }}
+          image-tags: ${{ needs.init.outputs.version }}
+          skip-existing: ${{ needs.init.outputs.version }}
+          container-registry-password: ${{ secrets.GITHUB_TOKEN }}
