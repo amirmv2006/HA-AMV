@@ -1,14 +1,14 @@
 name: "Bus line 21 countdown"
-version: "0.1.0"
+version: "0.1.1"
 slug: bus-line21
-description: "Next GVB line 21 departures at Solebaystraat, written to /media/bus_line21.json"
+description: "Next GVB line 21 departures at Solebaystraat, written to /share/bus_line21.json"
 arch:
   - aarch64
   - amd64
 init: false
 image: "ghcr.io/amirmv2006/bus-line21"
 map:
-  - type: media
+  - type: share
     read_only: false
 options:
   contact_email: ""

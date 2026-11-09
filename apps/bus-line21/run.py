@@ -1,7 +1,7 @@
 """Fetch GVB line 21 departures at Solebaystraat from OVapi and write them to JSON.
 
-Output (default /media/bus_line21.json) is rewritten after every poll so that
-Home Assistant can read it with a REST sensor.
+Output (default /share/bus_line21.json) is rewritten after every poll so that
+Home Assistant can read it from its own /share folder.
 """
 import gzip
 import json
@@ -26,7 +26,7 @@ STOPS = {
 PER_DIRECTION = 2
 POLL_SECONDS = int(os.environ.get("BUS_POLL_SECONDS", "60"))
 OPTIONS_PATH = os.environ.get("BUS_OPTIONS", "/data/options.json")
-OUTPUT_PATH = os.environ.get("BUS_OUTPUT", "/media/bus_line21.json")
+OUTPUT_PATH = os.environ.get("BUS_OUTPUT", "/share/bus_line21.json")
 AMS = ZoneInfo("Europe/Amsterdam")
 
 

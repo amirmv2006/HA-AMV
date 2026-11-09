@@ -2,7 +2,8 @@
 
 Polls the public GTFS-Realtime trip-updates feed from OVapi once a minute and
 keeps the next two departures for GVB line 21 at Solebaystraat in both
-directions. The result is written to `/media/bus_line21.json`.
+directions. The result is written to `/share/bus_line21.json`, the folder Home
+Assistant shares with apps.
 
 ## Options
 
