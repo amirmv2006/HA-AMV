@@ -3,6 +3,11 @@
 The latest result is served at http://<app-hostname>:8099/bus_line21.json on
 the Home Assistant internal network (no host port is published), so Home
 Assistant can read it with a REST sensor without any shared folder.
+
+Per direction the app keeps the next departure it has seen (absolute time,
+delay) and how old that information is. Empty or failed polls keep the last
+departure and let its age grow. Once the departure time has passed, all three
+fields are reset to null. Remaining minutes are computed by the consumer.
 """
 import gzip
 import json
@@ -26,14 +31,14 @@ STOPS = {
     "3980704": "Centraal Station",
     "3981354": "Geuzenveld De Sav. Lohmanstraat",
 }
-PER_DIRECTION = 2
+GRACE_SECONDS = 30  # a bus counts as gone this many seconds after its time
 POLL_SECONDS = int(os.environ.get("BUS_POLL_SECONDS", "60"))
 HTTP_PORT = int(os.environ.get("BUS_HTTP_PORT", "8099"))
 OPTIONS_PATH = os.environ.get("BUS_OPTIONS", "/data/options.json")
 AMS = ZoneInfo("Europe/Amsterdam")
 
 _latest_lock = threading.Lock()
-_latest_body = None  # bytes of the last good JSON payload
+_latest_body = None  # bytes of the last published JSON payload
 
 
 def load_contact():
@@ -46,7 +51,7 @@ def load_contact():
 
 
 def user_agent(contact):
-    base = "HA-AMV-bus-line21/0.1"
+    base = "HA-AMV-bus-line21/0.2"
     return f"{base} ({contact})" if contact else base
 
 
@@ -83,9 +88,19 @@ class Feed:
         return msg
 
 
-def departures(msg, now_ts):
-    """Next arrivals per direction for the configured stops on line 21."""
-    found = {label: [] for label in STOPS.values()}
+def new_state():
+    return {
+        "feed_ts": None,
+        "directions": {
+            label: {"departure_ts": None, "delay_seconds": None, "fresh_ts": None}
+            for label in STOPS.values()
+        },
+    }
+
+
+def next_departures(msg, now_ts):
+    """Earliest upcoming arrival per direction in this feed: {label: (ts, delay)}."""
+    found = {}
     for ent in msg.entity:
         if not ent.HasField("trip_update"):
             continue
@@ -98,24 +113,38 @@ def departures(msg, now_ts):
                 continue
             event = stu.arrival if stu.HasField("arrival") else stu.departure
             ts = event.time
-            if ts == 0 or ts < now_ts - 30:
+            if ts == 0 or ts < now_ts - GRACE_SECONDS:
                 continue
-            found[label].append((ts, event.delay))
-    result = {}
-    for label, items in found.items():
-        items.sort()
-        result[label] = [
-            {
-                "time": datetime.fromtimestamp(ts, AMS).isoformat(timespec="minutes"),
-                "minutes": max(0, round((ts - now_ts) / 60)),
-                "delay_seconds": delay,
+            best = found.get(label)
+            if best is None or ts < best[0]:
+                found[label] = (ts, event.delay)
+    return found
+
+
+def update_state(state, found, now_ts):
+    """Apply one poll. found holds fresh departures; empty means no new data."""
+    for d in state["directions"].values():
+        if d["departure_ts"] is not None and d["departure_ts"] < now_ts - GRACE_SECONDS:
+            d["departure_ts"] = d["delay_seconds"] = d["fresh_ts"] = None  # bus has gone
+    for label, (ts, delay) in found.items():
+        d = state["directions"][label]
+        d["departure_ts"] = ts
+        d["delay_seconds"] = delay
+        d["fresh_ts"] = now_ts
+
+
+def build_payload(state, now_ts):
+    directions = {}
+    for label, d in state["directions"].items():
+        if d["departure_ts"] is None:
+            directions[label] = {"departure_time": None, "delay_seconds": None, "age_seconds": None}
+        else:
+            directions[label] = {
+                "departure_time": datetime.fromtimestamp(d["departure_ts"], AMS).isoformat(timespec="seconds"),
+                "delay_seconds": d["delay_seconds"],
+                "age_seconds": round(now_ts - d["fresh_ts"]),
             }
-            for ts, delay in items[:PER_DIRECTION]
-        ]
-    return result
-
-
-def build_payload(directions, now_ts, feed_ts):
+    feed_ts = state["feed_ts"]
     return {
         "stop_name": STOP_NAME,
         "route": "21",
@@ -162,31 +191,39 @@ def start_server():
     print(f"serving /bus_line21.json on port {HTTP_PORT}", flush=True)
 
 
-def poll_once(feed):
-    msg = feed.fetch()
+def tick(feed, state):
+    """One poll cycle. Failures count as an empty poll, and the payload is republished so ages keep moving."""
     now_ts = time.time()
-    payload = build_payload(departures(msg, now_ts), now_ts, msg.header.timestamp)
-    return publish(payload)
+    found = {}
+    try:
+        msg = feed.fetch()
+        found = next_departures(msg, now_ts)
+        state["feed_ts"] = msg.header.timestamp
+    except Exception as err:  # keep serving the last known data; retry next round
+        print(f"poll failed: {err}", file=sys.stderr, flush=True)
+    update_state(state, found, now_ts)
+    return publish(build_payload(state, now_ts))
 
 
 def main():
     feed = Feed(user_agent(load_contact()))
-    once = "--once" in sys.argv
-    if once:
+    state = new_state()
+    if "--once" in sys.argv:
         try:
-            print(poll_once(feed).decode("utf-8"))
+            msg = feed.fetch()
         except Exception as err:
             print(f"poll failed: {err}", file=sys.stderr)
             sys.exit(1)
+        now_ts = time.time()
+        update_state(state, next_departures(msg, now_ts), now_ts)
+        state["feed_ts"] = msg.header.timestamp
+        print(publish(build_payload(state, now_ts)).decode("utf-8"))
         return
 
     start_server()
     while True:
-        try:
-            poll_once(feed)
-            print("updated", datetime.now(AMS).isoformat(timespec="seconds"), flush=True)
-        except Exception as err:  # keep serving the last good payload; retry next round
-            print(f"poll failed: {err}", file=sys.stderr, flush=True)
+        tick(feed, state)
+        print("updated", datetime.now(AMS).isoformat(timespec="seconds"), flush=True)
         time.sleep(POLL_SECONDS)
 
 

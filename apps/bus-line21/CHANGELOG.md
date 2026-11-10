@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.0
+
+- Expose the absolute departure time, delay and data age per direction instead
+  of a precomputed minute count. Consumers calculate remaining time themselves,
+  so values no longer go stale between polls.
+- Keep the last known departure when a poll returns nothing, and reset all
+  fields once the departure has passed.
+- Only the next departure per direction is kept (previously two).
+- Failed polls republish the payload so `age_seconds` keeps increasing.
+
 ## 0.1.3
 
 - Serve the latest departures as JSON on port 8099 inside the Home Assistant
