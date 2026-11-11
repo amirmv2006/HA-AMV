@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.2
+
+- Log, per direction, the earliest future arrival in the feed even when it is
+  not stored, and count stop events that have no time.
+
 ## 0.2.1
 
 - Log each poll: feed timestamp and age, entity and line 21 trip counts, stop
