@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1
+
+- Log each poll: feed timestamp and age, entity and line 21 trip counts, stop
+  event counts per direction, and the departure stored for each direction.
+
 ## 0.2.0
 
 - Expose the absolute departure time, delay and data age per direction instead
