@@ -191,6 +191,30 @@ def start_server():
     print(f"serving /bus_line21.json on port {HTTP_PORT}", flush=True)
 
 
+def log_poll(msg, found, state, now_ts):
+    """Short per-poll diagnostics for the app Log tab."""
+    line21 = [e.trip_update for e in msg.entity if e.HasField("trip_update") and e.trip_update.trip.route_id == ROUTE_ID]
+    events = {label: 0 for label in STOPS.values()}
+    for tu in line21:
+        for stu in tu.stop_time_update:
+            if stu.stop_id in STOPS:
+                events[STOPS[stu.stop_id]] += 1
+    feed_age = round(now_ts - msg.header.timestamp)
+    print(
+        f"feed ts={datetime.fromtimestamp(msg.header.timestamp, AMS).isoformat(timespec='seconds')} "
+        f"age={feed_age}s entities={len(msg.entity)} line21_trips={len(line21)} stop_events={events}",
+        flush=True,
+    )
+    for label, d in state["directions"].items():
+        upcoming = found.get(label)
+        print(
+            f"{label}: fresh={'yes' if upcoming else 'no'} "
+            f"departure={datetime.fromtimestamp(d['departure_ts'], AMS).isoformat(timespec='seconds') if d['departure_ts'] else 'none'} "
+            f"delay={d['delay_seconds']}",
+            flush=True,
+        )
+
+
 def tick(feed, state):
     """One poll cycle. Failures count as an empty poll, and the payload is republished so ages keep moving."""
     now_ts = time.time()
@@ -199,9 +223,11 @@ def tick(feed, state):
         msg = feed.fetch()
         found = next_departures(msg, now_ts)
         state["feed_ts"] = msg.header.timestamp
+        update_state(state, found, now_ts)
+        log_poll(msg, found, state, now_ts)
     except Exception as err:  # keep serving the last known data; retry next round
         print(f"poll failed: {err}", file=sys.stderr, flush=True)
-    update_state(state, found, now_ts)
+        update_state(state, found, now_ts)
     return publish(build_payload(state, now_ts))
 
 
