@@ -195,22 +195,34 @@ def log_poll(msg, found, state, now_ts):
     """Short per-poll diagnostics for the app Log tab."""
     line21 = [e.trip_update for e in msg.entity if e.HasField("trip_update") and e.trip_update.trip.route_id == ROUTE_ID]
     events = {label: 0 for label in STOPS.values()}
+    no_time = {label: 0 for label in STOPS.values()}
+    nearest = {label: None for label in STOPS.values()}  # earliest future time in the feed, ignoring the grace rule
     for tu in line21:
         for stu in tu.stop_time_update:
-            if stu.stop_id in STOPS:
-                events[STOPS[stu.stop_id]] += 1
+            if stu.stop_id not in STOPS:
+                continue
+            label = STOPS[stu.stop_id]
+            events[label] += 1
+            ts = (stu.arrival if stu.HasField("arrival") else stu.departure).time
+            if ts == 0:
+                no_time[label] += 1
+            elif ts >= now_ts and (nearest[label] is None or ts < nearest[label]):
+                nearest[label] = ts
+
+    def fmt(ts):
+        return datetime.fromtimestamp(ts, AMS).isoformat(timespec="seconds") if ts else "none"
+
     feed_age = round(now_ts - msg.header.timestamp)
     print(
-        f"feed ts={datetime.fromtimestamp(msg.header.timestamp, AMS).isoformat(timespec='seconds')} "
-        f"age={feed_age}s entities={len(msg.entity)} line21_trips={len(line21)} stop_events={events}",
+        f"feed ts={fmt(msg.header.timestamp)} age={feed_age}s entities={len(msg.entity)} "
+        f"line21_trips={len(line21)} stop_events={events} no_time={no_time}",
         flush=True,
     )
     for label, d in state["directions"].items():
-        upcoming = found.get(label)
         print(
-            f"{label}: fresh={'yes' if upcoming else 'no'} "
-            f"departure={datetime.fromtimestamp(d['departure_ts'], AMS).isoformat(timespec='seconds') if d['departure_ts'] else 'none'} "
-            f"delay={d['delay_seconds']}",
+            f"{label}: fresh={'yes' if found.get(label) else 'no'} "
+            f"departure={fmt(d['departure_ts'])} delay={d['delay_seconds']} "
+            f"feed_next_future={fmt(nearest[label])}",
             flush=True,
         )
 
