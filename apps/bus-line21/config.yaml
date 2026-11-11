@@ -1,5 +1,5 @@
 name: "Bus line 21 countdown"
-version: "0.2.2"
+version: "0.2.3"
 slug: bus-line21
 description: "Next GVB line 21 departures at Solebaystraat, served as JSON on the Home Assistant network"
 arch:
