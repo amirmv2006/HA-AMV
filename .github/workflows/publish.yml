@@ -1,10 +1,14 @@
 name: Publish apps
 
-# On every push to main that touches an app:
-#   1. bump: if the push did not set `version` in config.yaml by hand, bump the
-#      patch number and commit it back to main. A hand-edited version (for
-#      major/minor changes) is used as-is.
-#   2. build + publish the image for that version to GHCR.
+# On every push to main that changes app code (not only docs):
+#   1. version: work out the version. If the push did not set `version` in
+#      config.yaml by hand, use the next patch number. Nothing is committed yet.
+#   2. build + publish the image and multi-arch manifest for that version.
+#   3. announce: only after the image is published, commit the version bump
+#      to main (skipped when the version was set by hand). The Home Assistant
+#      app store reads config.yaml from main, so it never offers a version
+#      whose image does not exist.
+#   4. release: create the GitHub release for that version.
 # Existing tags are skipped, never overwritten.
 
 on:
@@ -26,27 +30,26 @@ concurrency:
 env:
   APP: bus-line21
   APP_DIR: apps/bus-line21
+  CFG: apps/bus-line21/config.yaml
   ARCHITECTURES: '["amd64", "aarch64"]'
 
 jobs:
-  bump:
-    name: Bump patch version
+  version:
+    name: Work out version
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     outputs:
-      version: ${{ steps.bump.outputs.version }}
-      sha: ${{ steps.bump.outputs.sha }}
+      publish: ${{ steps.version.outputs.publish }}
+      version: ${{ steps.version.outputs.version }}
+      bump: ${{ steps.version.outputs.bump }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Bump version unless set by hand
-        id: bump
+      - name: Compute next version
+        id: version
         env:
-          CFG: apps/bus-line21/config.yaml
           BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
@@ -54,33 +57,44 @@ jobs:
           current=$(read_version "$CFG")
           test -n "$current" || { echo "no version in $CFG"; exit 1; }
 
+          # Only app code counts; a docs-only push publishes nothing.
+          if [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            code_changes=$(git diff --name-only "$BEFORE" "$GITHUB_SHA" -- "$APP_DIR" | grep -v '\.md$' || true)
+          else
+            code_changes="new"
+          fi
+          if [ -z "$code_changes" ]; then
+            echo "Only docs changed under $APP_DIR; nothing to publish."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "bump=false" >> "$GITHUB_OUTPUT"
+            echo "version=$current" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           previous=""
           if [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
             previous=$(git show "$BEFORE:$CFG" 2>/dev/null | sed -n 's/^version: *"\(.*\)"/\1/p' || true)
           fi
 
-          new="$current"
           if [ -n "$previous" ] && [ "$current" != "$previous" ]; then
             echo "Version set by hand: $previous -> $current. Keeping it."
+            new="$current"
+            bump=false
           else
             IFS=. read -r major minor patch <<< "$current"
             new="$major.$minor.$((patch + 1))"
-            sed -i "s/^version: .*/version: \"$new\"/" "$CFG"
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add "$CFG"
-            git commit -m "Bump $APP to $new [skip ci]"
-            git pull --rebase origin main
-            git push origin HEAD:main
-            echo "Bumped $current -> $new"
+            bump=true
+            echo "Next version: $current -> $new (committed after the image is published)."
           fi
 
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+          echo "bump=$bump" >> "$GITHUB_OUTPUT"
           echo "version=$new" >> "$GITHUB_OUTPUT"
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   init:
     name: Prepare build matrix
-    needs: bump
+    needs: version
+    if: needs.version.outputs.publish == 'true'
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
@@ -94,7 +108,7 @@ jobs:
 
   build:
     name: Build ${{ matrix.arch }}
-    needs: [bump, init]
+    needs: [version, init]
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -104,10 +118,8 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.init.outputs.matrix) }}
     steps:
-      - name: Check out bumped commit
+      - name: Check out pushed commit
         uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.bump.outputs.sha }}
 
       - name: Build and push image
         uses: home-assistant/builder/actions/build-image@2026.09.0
@@ -115,15 +127,15 @@ jobs:
           arch: ${{ matrix.arch }}
           context: ${{ env.APP_DIR }}
           image: ${{ matrix.image }}
-          image-tags: ${{ needs.bump.outputs.version }}
-          version: ${{ needs.bump.outputs.version }}
-          skip-existing: ${{ needs.bump.outputs.version }}
+          image-tags: ${{ needs.version.outputs.version }}
+          version: ${{ needs.version.outputs.version }}
+          skip-existing: ${{ needs.version.outputs.version }}
           container-registry-password: ${{ secrets.GITHUB_TOKEN }}
           push: "true"
 
   manifest:
     name: Publish multi-arch manifest
-    needs: [bump, init, build]
+    needs: [version, init, build]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -135,25 +147,62 @@ jobs:
         with:
           architectures: ${{ env.ARCHITECTURES }}
           image-name: ${{ env.APP }}
-          image-tags: ${{ needs.bump.outputs.version }}
-          skip-existing: ${{ needs.bump.outputs.version }}
+          image-tags: ${{ needs.version.outputs.version }}
+          skip-existing: ${{ needs.version.outputs.version }}
           container-registry-password: ${{ secrets.GITHUB_TOKEN }}
+
+  announce:
+    name: Announce version on main
+    # Runs only after the manifest is published, so the store never sees a version without an image.
+    needs: [version, manifest]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.commit.outputs.sha }}
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Commit version bump
+        id: commit
+        env:
+          NEW: ${{ needs.version.outputs.version }}
+          BUMP: ${{ needs.version.outputs.bump }}
+        run: |
+          set -euo pipefail
+          if [ "$BUMP" = "true" ]; then
+            sed -i "s/^version: .*/version: \"$NEW\"/" "$CFG"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add "$CFG"
+            git commit -m "Bump $APP to $NEW [skip ci]"
+            git pull --rebase origin main
+            git push origin HEAD:main
+            echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          else
+            # Version was set by hand in the pushed commit; release that commit.
+            echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          fi
 
   release:
     name: Create GitHub release
-    needs: [bump, manifest]
+    needs: [version, announce]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      VERSION: ${{ needs.bump.outputs.version }}
-      SHA: ${{ needs.bump.outputs.sha }}
+      VERSION: ${{ needs.version.outputs.version }}
+      SHA: ${{ needs.announce.outputs.sha }}
     steps:
-      - name: Check out bumped commit
+      - name: Check out announced commit
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.bump.outputs.sha }}
+          ref: ${{ needs.announce.outputs.sha }}
 
       - name: Create release with notes
         run: |
